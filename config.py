@@ -5,8 +5,8 @@ def set_config():
     parser = argparse.ArgumentParser()
     # Data
     parser.add_argument('--dataset', type=str, default='DEAP')
-    parser.add_argument('--data-path', type=str, default='/home/xiaominghao/eeg/')
-    parser.add_argument('--subjects', type=int, default=19)
+    parser.add_argument('--data-path', type=str, default='/home/xiaominghao/deap/')
+    parser.add_argument('--subjects', type=int, default=32)
     parser.add_argument('--num-class', type=int, default=2, choices=[2, 3, 4])
     parser.add_argument('--label-type', type=str, default='L', choices=['A', 'V', 'D', 'L'])
     parser.add_argument('--segment', type=int, default=4)
