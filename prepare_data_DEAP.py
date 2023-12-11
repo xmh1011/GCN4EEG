@@ -4,39 +4,6 @@ from train_model import *
 _, os.environ['CUDA_VISIBLE_DEVICES'] = config.set_config()
 
 
-def split(data, label, segment_length=1, overlap=0, sampling_rate=256):
-    """
-    This function split one trial's data into shorter segments
-    Parameters
-    ----------
-    data: (trial, f, channel, data)
-    label: (trial,)
-    segment_length: how long each segment is (e.g. 1s, 2s,...)
-    overlap: overlap rate
-    sampling_rate: sampling rate
-
-    Returns
-    -------
-    data:(tiral, num_segment, f, channel, segment_legnth)
-    label:(trial, num_segment,)
-    """
-    data_shape = data.shape
-    step = int(segment_length * sampling_rate * (1 - overlap))
-    data_segment = sampling_rate * segment_length
-    data_split = []
-
-    number_segment = int((data_shape[-1] - data_segment) // step)
-    for i in range(number_segment + 1):
-        data_split.append(data[:, :, :, (i * step):(i * step + data_segment)])
-    data_split_array = np.stack(data_split, axis=1)
-    label = np.stack([np.repeat(label[i], int(number_segment + 1)) for i in range(len(label))], axis=0)
-    print("The data and label are split: Data shape:" + str(data_split_array.shape) + " Label:" + str(
-        label.shape))
-    data = data_split_array
-    assert len(data) == len(label)
-    return data, label
-
-
 class PrepareData:
     def __init__(self, args):
         # init all the parameters here
@@ -89,7 +56,7 @@ class PrepareData:
                 data_ = np.expand_dims(data_, axis=-3)
 
             if split:
-                data_, label_ = split(
+                data_, label_ = self.split(
                     data=data_, label=label_, segment_length=self.args.segment,
                     overlap=self.args.overlap, sampling_rate=self.args.sampling_rate)
 
@@ -178,10 +145,10 @@ class PrepareData:
         -------
         label: (trial,)
         """
-        if self.label_type == 'A':
-            label = label[:, 1]
-        elif self.label_type == 'V':
+        if self.label_type == 'V':
             label = label[:, 0]
+        elif self.label_type == 'A':
+            label = label[:, 1]
         elif self.label_type == 'D':
             label = label[:, 2]
         elif self.label_type == 'L':
@@ -218,3 +185,35 @@ class PrepareData:
         dataset['data'] = data
         dataset['label'] = label
         dataset.close()
+
+    def split(self, data, label, segment_length=1, overlap=0, sampling_rate=256):
+        """
+        This function split one trial's data into shorter segments
+        Parameters
+        ----------
+        data: (trial, f, channel, data)
+        label: (trial,)
+        segment_length: how long each segment is (e.g. 1s, 2s,...)
+        overlap: overlap rate
+        sampling_rate: sampling rate
+
+        Returns
+        -------
+        data:(tiral, num_segment, f, channel, segment_legnth)
+        label:(trial, num_segment,)
+        """
+        data_shape = data.shape
+        step = int(segment_length * sampling_rate * (1 - overlap))
+        data_segment = sampling_rate * segment_length
+        data_split = []
+
+        number_segment = int((data_shape[-1] - data_segment) // step)
+        for i in range(number_segment + 1):
+            data_split.append(data[:, :, :, (i * step):(i * step + data_segment)])
+        data_split_array = np.stack(data_split, axis=1)
+        label = np.stack([np.repeat(label[i], int(number_segment + 1)) for i in range(len(label))], axis=0)
+        print("The data and label are split: Data shape:" + str(data_split_array.shape) + " Label:" + str(
+            label.shape))
+        data = data_split_array
+        assert len(data) == len(label)
+        return data, label
