@@ -2,7 +2,7 @@ import copy
 import datetime
 from sklearn.model_selection import KFold
 from train_model import *
-from utils import Averager, ensure_path
+from utils import Averager
 
 ROOT = os.getcwd()
 _, os.environ['CUDA_VISIBLE_DEVICES'] = config.set_config()
@@ -74,14 +74,15 @@ class CrossValidation:
         # (trial, segment, 1, chan, datapoint) to (trial*segments, 1, chan, datapoint)
         data_train = np.concatenate(data_train, axis=0)
         label_train = np.concatenate(label_train, axis=0)
+
+        # the testing data do not need to be concatenated, when doing leave-one-trial-out
         if len(data_test.shape) > 4:
-            # When leave one trial out is conducted, the test data will be (segments, 1, chan, datapoint),
-            # hence, no need to concatenate the first dimension to get trial*segments.
             data_test = np.concatenate(data_test, axis=0)
             label_test = np.concatenate(label_test, axis=0)
 
         data_train, data_test = self.normalize(train=data_train, test=data_test)
-        # Prepare the data format for training the model using PyTorch
+
+        # Prepare the data format for training the model
         data_train = torch.from_numpy(data_train).float()
         label_train = torch.from_numpy(label_train).long()
 
@@ -158,18 +159,25 @@ class CrossValidation:
         tta = []  # total test accuracy
         tva = []  # total validation accuracy
         ttf = []  # total test f1
-        tvf = []  # total validation f1
+
+        tta_trial = []   # for trial-wise evaluation
+        ttf_trial = []   # for trial-wise evaluation
 
         for sub in subject:
             data, label = self.load_per_subject(sub)
+            va = Averager()
             va_val = Averager()
-            vf_val = Averager()
             preds, acts = [], []
+            preds_trial, acts_trial = [], []
             kf = KFold(n_splits=fold, shuffle=shuffle)
             for idx_fold, (idx_train, idx_test) in enumerate(kf.split(data)):
                 print('Outer loop: {}-fold-CV Fold:{}'.format(fold, idx_fold))
                 data_train, label_train, data_test, label_test = self.prepare_data(
                     idx_train=idx_train, idx_test=idx_test, data=data, label=label)
+
+                data_train, label_train, data_val, label_val = self.split_balance_class(
+                    data=data_train, label=label_train, train_rate=self.args.training_rate, random=True
+                )
 
                 if reproduce:
                     # to reproduce the reported ACC
@@ -177,102 +185,65 @@ class CrossValidation:
                                                reproduce=reproduce,
                                                subject=sub, fold=idx_fold)
                     acc_val = 0
-                    f1_val = 0
                 else:
                     # to train new models
-                    acc_val, f1_val = self.first_stage(data=data_train, label=label_train,
-                                                       subject=sub, fold=idx_fold)
+                    # Check the dimension of the training, validation and test set
+                    print('Training:', data_train.size(), label_train.size())
+                    print('Validation:', data_val.size(), label_val.size())
+                    print('Test:', data_test.size(), label_test.size())
 
-                    combine_train(args=self.args,
-                                  data=data_train, label=label_train,
-                                  subject=sub, fold=idx_fold, target_acc=1)
-
+                    acc_val = train(args=self.args,
+                                    data_train=data_train,
+                                    label_train=label_train,
+                                    data_val=data_val,
+                                    label_val=label_val,
+                                    subject=sub,
+                                    fold=idx_fold)
+                    # test the model on testing data
                     acc_test, pred, act = test(args=self.args, data=data_test, label=label_test,
                                                reproduce=reproduce,
                                                subject=sub, fold=idx_fold)
+
+                # get trial-wise prediction
+                act_trial, pred_trial = self.trial_wise_voting(
+                    act=act, pred=pred,
+                    num_segment_per_trial=int(self.args.trial_duration/self.args.segment),
+                    trial_in_fold=len(idx_test)
+                )
                 va_val.add(acc_val)
-                vf_val.add(f1_val)
+                va.add(acc_test)
                 preds.extend(pred)
                 acts.extend(act)
+                preds_trial.extend(pred_trial)
+                acts_trial.extend(act_trial)
 
             tva.append(va_val.item())
-            tvf.append(vf_val.item())
             acc, f1, _ = get_metrics(y_pred=preds, y_true=acts)
+            acc_trial, f1_trial, _ = get_metrics(y_pred=preds_trial, y_true=acts_trial)
+
             tta.append(acc)
             ttf.append(f1)
-            result = '{},{}'.format(tta[-1], f1)
+            tta_trial.append(acc_trial)
+            ttf_trial.append(f1_trial)
+            result = '{},{}'.format(tta[-1], ttf[-1])
             self.log2txt(result)
 
         # prepare final report
-        tta = np.array(tta)
-        ttf = np.array(ttf)
-        tva = np.array(tva)
-        tvf = np.array(tvf)
         mACC = np.mean(tta)
         mF1 = np.mean(ttf)
         std = np.std(tta)
         mACC_val = np.mean(tva)
         std_val = np.std(tva)
-        mF1_val = np.mean(tvf)
+
+        mACC_trial = np.mean(tta_trial)
+        mF1_trial = np.mean(ttf_trial)
 
         print('Final: test mean ACC:{} std:{}'.format(mACC, std))
         print('Final: val mean ACC:{} std:{}'.format(mACC_val, std_val))
-        print('Final: val mean F1:{}'.format(mF1_val))
-        results = 'test mAcc={} mF1={} val mAcc={} val F1={}'.format(mACC,
-                                                                     mF1, mACC_val, mF1_val)
+        results = 'test mAcc={} mF1={} val mAcc={}'.format(mACC, mF1, mACC_val)
         self.log2txt(results)
-
-    def first_stage(self, data, label, subject, fold):
-        """
-        this function achieves n-fold-CV to:
-            1. select hyper-parameters on training data
-            2. get the model for evaluation on testing data
-        param data: (segments, 1, channel, data)
-        param label: (segments,)
-        param subject: which subject the data belongs to
-        param fold: which fold the data belongs to
-        return: mean validation accuracy
-        """
-        # use n-fold-CV to select hyper-parameters on training data
-        # save the best performance model and the corresponding acc for the second stage
-        # data: trial x 1 x channel x time
-        kf = KFold(n_splits=3, shuffle=True)
-        va = Averager()
-        vf = Averager()
-        va_item = []
-        maxAcc = 0.0
-        for i, (idx_train, idx_test) in enumerate(kf.split(data)):
-            print('Inner 3-fold-CV Fold:{}'.format(i))
-            data_train, label_train = data[idx_train], label[idx_train]
-
-            data_train, label_train, data_val, label_val = self.split_balance_class(
-                data=data_train, label=label_train, train_rate=self.args.training_rate, random=True
-            )
-            print('Training:', data_train.size(), label_train.size())
-            print('Validation:', data_val.size(), label_val.size())
-            acc_val, F1_val = train(args=self.args,
-                                    data_train=data_train,
-                                    label_train=label_train,
-                                    data_val=data_val,
-                                    label_val=label_val,
-                                    subject=subject,
-                                    fold=fold)
-            va.add(acc_val)
-            vf.add(F1_val)
-            va_item.append(acc_val)
-            if acc_val >= maxAcc:
-                maxAcc = acc_val
-                # choose the model with higher val acc as the model to second stage
-                old_name = os.path.join(self.args.save_path, 'candidate.pth')
-                new_name = os.path.join(self.args.save_path, 'max-acc.pth')
-                if os.path.exists(new_name):
-                    os.remove(new_name)
-                os.rename(old_name, new_name)
-                print('New max ACC model saved, with the val ACC being:{}'.format(acc_val))
-
-        mAcc = va.item()
-        mF1 = vf.item()
-        return mAcc, mF1
+        results = 'test mAcc={} mF1={} (trial-wise)'.format(mACC_trial, mF1_trial)
+        self.log2txt(results)
 
     def log2txt(self, content):
         """

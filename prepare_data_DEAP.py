@@ -89,7 +89,7 @@ class PrepareData:
         subject_path = os.path.join(self.data_path, sub_code)
         subject = cPickle.load(open(subject_path, 'rb'), encoding='latin1')
         label = subject['labels']
-        data = subject['data']  # Excluding the first 3s of baseline
+        data = subject['data'][:, :, 900:]
         #   data: 40 x 32 x 7680
         #   label: 40 x 4
         # reorder the EEG channel to build the local-global graphs
